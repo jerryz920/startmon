@@ -17,7 +17,9 @@
  * GNU General Public License for more details.
  */
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -31,6 +33,9 @@
 #include <linux/netlink.h>
 #include <linux/connector.h>
 #include <linux/cn_proc.h>
+
+#include <errno.h>
+
 
 void usage(char *arg0) {
 	fprintf(stderr, "Usage:\n  %s [-eft] [--exec] [--fork] [--thread]\n\n"
@@ -53,13 +58,26 @@ int forkflag   = 0;
 int threadflag = 0;
 
 char procname[50];
+char execname[50];
 char cmdlinebuf[4096];
+char exebuf[4096];
+char cmdlinebuf_escaped[4096];
+
 ssize_t bytes;
 
 char *get_cmdline(pid_t id) {
 	int fd;
 	ssize_t remain;
-	char *c;
+	char *c, *escape;
+
+        /// copy exec quickly for processing
+        sprintf(execname, "/proc/%d/exe", id);
+        ssize_t sz = readlink(execname, exebuf, 4096);
+        if (sz < 0) {
+          fprintf(stderr, "error reading links: %s", strerror(errno));
+          sz = 0;
+        }
+        exebuf[sz] = 0;
 
 	sprintf(procname, "/proc/%d/cmdline", id);
 	fd = open(procname, O_RDONLY);
@@ -70,9 +88,16 @@ char *get_cmdline(pid_t id) {
 			if (*c < 32)
 				*c = ' ';
 		*c = 0;
+                for (c=cmdlinebuf, escape=cmdlinebuf_escaped; *c; c++, escape++)  {
+                  if (*c == '"') {
+                    *escape++ = '\\';
+                  }
+                  *escape = *c;
+                }
+                *escape = 0;
 	} else
-		bytes = sprintf(cmdlinebuf, "<N/A>");
-	return cmdlinebuf;
+		bytes = sprintf(cmdlinebuf_escaped, "<N/A>");
+	return cmdlinebuf_escaped;
 }
 
 /* Given a single connection message, evaluate and process
@@ -88,7 +113,7 @@ void dispatch_nl_cn(struct cn_msg *hdr) {
 				break;
 			if (pe->event_data.fork.child_pid == pe->event_data.fork.child_tgid) {
 				/* Regular fork, parent process is the originator */
-				printf("Fork %d %d %s\n",
+				printf("Fork {\"parent\": %d,  \"child\":%d, \"cmd\": \"%s\"}\n",
 					pe->event_data.fork.parent_pid,
 					pe->event_data.fork.child_pid,
 					get_cmdline(pe->event_data.fork.child_tgid));
@@ -106,9 +131,10 @@ void dispatch_nl_cn(struct cn_msg *hdr) {
 				break;
 			if (pe->event_data.exec.process_pid == pe->event_data.exec.process_tgid) {
 				/* Thread group leader did an exec */
-				printf("Exec - %d %s\n",
+				printf("Exec {\"pid\":%d, \"cmd\": \"%s\", \"exec\": \"%s\"}\n",
 					pe->event_data.exec.process_pid,
-					get_cmdline(pe->event_data.exec.process_tgid));
+					get_cmdline(pe->event_data.exec.process_tgid),
+                                        exebuf);
 			} else {
 				/* Subordinate thread did an exec */
 				if (threadflag)
